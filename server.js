@@ -14,7 +14,7 @@ const PORT = 4000;
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// Swagger configuration
+// Swagger configuration (unchanged)
 const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
@@ -39,6 +39,7 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 let scheduler = null;
 const AUTO_TERMS = ['iptv', 'm3u', 'bein', 'بث مباشر'];
 
+// This function remains unchanged:
 const runAutoSearch = async () => {
   const query = AUTO_TERMS.join(' ');
   console.log('🔄 Running scheduled search for:', query);
@@ -118,6 +119,9 @@ const runAutoSearch = async () => {
   const filename = `auto_results_${Date.now()}.json`;
   fs.writeFileSync(filename, JSON.stringify(filtered, null, 2));
   console.log(`✅ Saved ${filtered.length} results to ${filename}`);
+
+  // Return the filtered data and filename for use in API response
+  return { filtered, filename };
 };
 
 /**
@@ -131,13 +135,22 @@ const runAutoSearch = async () => {
  *       400:
  *         description: Scheduler is already running
  */
-app.post('/api/start-scheduler', (req, res) => {
+app.post('/api/start-scheduler', async (req, res) => {
   if (scheduler) return res.status(400).json({ message: 'Scheduler already running' });
 
-  runAutoSearch();
+  // Run the search immediately, get results and filename
+  const { filtered, filename } = await runAutoSearch();
+
+  // Start the interval
   scheduler = setInterval(runAutoSearch, 60000);
   console.log('✅ Scheduler started');
-  res.json({ message: 'Scheduler started' });
+
+  // Send back message AND the search results immediately for download
+  res.json({
+    message: 'Scheduler started',
+    results: filtered,
+    filename
+  });
 });
 
 /**
@@ -199,7 +212,31 @@ app.get('/api/latest-results', (req, res) => {
   res.json(JSON.parse(data));
 });
 
+// === NEW ENDPOINT to serve latest results JSON as a file for download ===
+app.get('/api/download-latest', (req, res) => {
+  const files = fs.readdirSync('.')
+    .filter(name => name.startsWith('auto_results_') && name.endsWith('.json'))
+    .sort()
+    .reverse();
+
+  if (files.length === 0) {
+    return res.status(404).json({ message: 'No results found to download' });
+  }
+
+  const latestFile = files[0];
+  const filePath = path.join(__dirname, latestFile);
+
+  // Set headers so browser downloads the file
+  res.download(filePath, latestFile, err => {
+    if (err) {
+      console.error('Error sending file:', err);
+      res.status(500).send('Error downloading the file');
+    }
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Backend running at http://localhost:${PORT}`);
   console.log(`📚 Swagger docs available at http://localhost:${PORT}/api-docs`);
 });
+ 
