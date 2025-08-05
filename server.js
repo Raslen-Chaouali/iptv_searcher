@@ -25,7 +25,7 @@ const swaggerOptions = {
     },
     servers: [
       {
-        url: 'http://localhost:4000', // Change this to your deployed URL later
+        url: 'https://iptv-searcher.onrender.com/api-docs', // Change this to your deployed URL later
       },
     ],
   },
@@ -239,4 +239,3 @@ app.listen(PORT, () => {
   console.log(`🚀 Backend running at http://localhost:${PORT}`);
   console.log(`📚 Swagger docs available at http://localhost:${PORT}/api-docs`);
 });
- 
