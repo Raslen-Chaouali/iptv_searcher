@@ -45,28 +45,47 @@ const swaggerSpec = swaggerJsdoc(swaggerOptions);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 // ===============================
-// Scheduler configuration
+// Scheduler configuration - FIXED
 // ===============================
 let scheduler = null;
-let isRunning = false; // prevent overlapping runs
+let isRunning = false;
 const AUTO_TERMS = ['iptv', 'm3u', 'bein', 'بث مباشر'];
 
+// Store all active intervals to clear them properly
+const activeIntervals = new Set();
+
 const runAutoSearch = async () => {
+  if (isRunning) {
+    console.log('⏸️ Skipping run - previous still in progress');
+    return;
+  }
+
   const query = AUTO_TERMS.join(' ');
   console.log('🔄 Running scheduled search for:', query);
 
+  isRunning = true;
   let allItems = [];
 
-  // Google Search
   try {
+    // Google Search
     const API_KEY = process.env.GOOGLE_SEARCH_API_KEY;
     const CSE_ID = process.env.GOOGLE_CSE_ID;
 
-    for (let start = 1; start <= 91; start += 10) {
-      const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&key=${API_KEY}&cx=${CSE_ID}&num=10&start=${start}`;
-      const response = await axios.get(url);
-      const items = response.data.items || [];
-      allItems.push(...items);
+    if (API_KEY && CSE_ID) {
+      for (let start = 1; start <= 91; start += 10) {
+        try {
+          const url = `https://www.googleapis.com/customsearch/v1?q=${encodeURIComponent(query)}&key=${API_KEY}&cx=${CSE_ID}&num=10&start=${start}`;
+          const response = await axios.get(url);
+          const items = response.data.items || [];
+          allItems.push(...items);
+        } catch (err) {
+          console.error('❌ Google Search Error for start', start, ':', err.message);
+          if (err.response?.status === 429) {
+            console.log('⚠️ Rate limited by Google, skipping further requests');
+            break;
+          }
+        }
+      }
     }
   } catch (err) {
     console.error('❌ Google Search Error:', err.message);
@@ -93,17 +112,19 @@ const runAutoSearch = async () => {
 
   // SerpAPI Search
   try {
-    const serpResponse = await axios.get('https://serpapi.com/search', {
-      params: {
-        q: query,
-        api_key: process.env.SERPAPI_API_KEY,
-        engine: 'google',
-        num: 100
-      }
-    });
+    if (process.env.SERPAPI_API_KEY) {
+      const serpResponse = await axios.get('https://serpapi.com/search', {
+        params: {
+          q: query,
+          api_key: process.env.SERPAPI_API_KEY,
+          engine: 'google',
+          num: 100
+        }
+      });
 
-    const serpItems = serpResponse.data.organic_results || [];
-    allItems.push(...serpItems);
+      const serpItems = serpResponse.data.organic_results || [];
+      allItems.push(...serpItems);
+    }
   } catch (err) {
     console.error('❌ SerpAPI Error:', err.message);
   }
@@ -131,11 +152,12 @@ const runAutoSearch = async () => {
   fs.writeFileSync(filename, JSON.stringify(filtered, null, 2));
   console.log(`✅ Saved ${filtered.length} results to ${filename}`);
 
+  isRunning = false;
   return { filtered, filename };
 };
 
 // ===============================
-// API Endpoints
+// API Endpoints - FIXED
 // ===============================
 
 /**
@@ -145,31 +167,47 @@ const runAutoSearch = async () => {
  *     summary: Start the automatic IPTV search scheduler
  */
 app.post('/api/start-scheduler', checkSecret, async (req, res) => {
+  // Clear any existing scheduler first
   if (scheduler) {
-    return res.status(400).json({ message: 'Scheduler already running' });
+    clearInterval(scheduler);
+    scheduler = null;
+    console.log('🧹 Cleared existing scheduler before starting new one');
   }
 
-  // Run once immediately
-  const { filtered, filename } = await runAutoSearch();
-
-  // Then schedule every 60 seconds
-  scheduler = setInterval(async () => {
-    if (isRunning) return; // skip if previous run not finished
-    isRunning = true;
-    try {
-      await runAutoSearch();
-    } catch (err) {
-      console.error("❌ Scheduled run failed:", err.message);
-    }
-    isRunning = false;
-  }, 18000000);
-
-  console.log('✅ Scheduler started');
-  res.json({
-    message: 'Scheduler started',
-    results: filtered,
-    filename
+  // Clear all active intervals
+  activeIntervals.forEach(intervalId => {
+    clearInterval(intervalId);
+    console.log('🧹 Cleared interval:', intervalId);
   });
+  activeIntervals.clear();
+
+  try {
+    // Run once immediately
+    const result = await runAutoSearch();
+    
+    // Then schedule every 60 seconds with proper error handling
+    scheduler = setInterval(async () => {
+      try {
+        await runAutoSearch();
+      } catch (err) {
+        console.error("❌ Scheduled run failed:", err.message);
+        isRunning = false; // Ensure flag is reset even on error
+      }
+    }, 60000); // 60 seconds
+
+    // Store the interval ID for proper cleanup
+    activeIntervals.add(scheduler);
+
+    console.log('✅ Scheduler started with interval ID:', scheduler);
+    res.json({
+      message: 'Scheduler started',
+      results: result?.filtered || [],
+      filename: result?.filename || 'no_file'
+    });
+  } catch (err) {
+    console.error('❌ Error starting scheduler:', err.message);
+    res.status(500).json({ message: 'Error starting scheduler', error: err.message });
+  }
 });
 
 /**
@@ -179,15 +217,34 @@ app.post('/api/start-scheduler', checkSecret, async (req, res) => {
  *     summary: Stop the IPTV scheduler
  */
 app.post('/api/stop-scheduler', checkSecret, (req, res) => {
-  if (!scheduler) {
-    return res.status(400).json({ message: 'Scheduler not running' });
+  let stoppedCount = 0;
+
+  // Clear the main scheduler
+  if (scheduler) {
+    clearInterval(scheduler);
+    console.log('🛑 Stopped main scheduler:', scheduler);
+    scheduler = null;
+    stoppedCount++;
   }
 
-  clearInterval(scheduler);
-  scheduler = null;
-  isRunning = false; // reset
-  console.log('🛑 Scheduler stopped');
-  res.json({ message: 'Scheduler stopped' });
+  // Clear all active intervals
+  activeIntervals.forEach(intervalId => {
+    clearInterval(intervalId);
+    console.log('🛑 Stopped interval:', intervalId);
+    stoppedCount++;
+  });
+  activeIntervals.clear();
+
+  // Reset running flag
+  isRunning = false;
+
+  if (stoppedCount > 0) {
+    console.log('✅ Scheduler completely stopped. Cleared', stoppedCount, 'intervals');
+    res.json({ message: `Scheduler stopped. Cleared ${stoppedCount} intervals` });
+  } else {
+    console.log('ℹ️ Scheduler was not running');
+    res.status(400).json({ message: 'Scheduler not running' });
+  }
 });
 
 /**
@@ -197,7 +254,13 @@ app.post('/api/stop-scheduler', checkSecret, (req, res) => {
  *     summary: Check if the scheduler is currently running
  */
 app.get('/api/scheduler-status', checkSecret, (req, res) => {
-  res.json({ running: !!scheduler });
+  const running = !!scheduler && activeIntervals.size > 0;
+  console.log('📊 Status check - Running:', running, 'Active intervals:', activeIntervals.size);
+  res.json({ 
+    running: running,
+    activeIntervals: activeIntervals.size,
+    nextRun: running ? 'active' : 'none'
+  });
 });
 
 /**
@@ -241,6 +304,16 @@ app.get('/api/download-latest', checkSecret, (req, res) => {
       res.status(500).send('Error downloading the file');
     }
   });
+});
+
+// Graceful shutdown handling
+process.on('SIGINT', () => {
+  console.log('\n🛑 Shutting down gracefully...');
+  if (scheduler) {
+    clearInterval(scheduler);
+  }
+  activeIntervals.forEach(intervalId => clearInterval(intervalId));
+  process.exit(0);
 });
 
 app.listen(PORT, () => {
