@@ -162,7 +162,7 @@ app.post('/api/start-scheduler', checkSecret, async (req, res) => {
       console.error("❌ Scheduled run failed:", err.message);
     }
     isRunning = false;
-  }, 60000);
+  }, 18000000);
 
   console.log('✅ Scheduler started');
   res.json({
