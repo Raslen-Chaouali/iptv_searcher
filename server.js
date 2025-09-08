@@ -14,7 +14,7 @@ const PORT = 4000;
 app.use(cors({ origin: '*' }));
 app.use(express.json());
 
-// === NEW: Middleware to check secret password ===
+// === Middleware to check secret password ===
 function checkSecret(req, res, next) {
   const provided = req.query.secret || req.headers['x-scheduler-secret'];
   if (provided !== process.env.SCHEDULER_SECRET) {
@@ -23,7 +23,7 @@ function checkSecret(req, res, next) {
   next();
 }
 
-// Swagger configuration (unchanged)
+// Swagger configuration
 const swaggerOptions = {
   definition: {
     openapi: '3.0.0',
@@ -34,18 +34,21 @@ const swaggerOptions = {
     },
     servers: [
       {
-        url: 'https://iptv-searcher.onrender.com/api-docs', // Change this to your deployed URL later
+        url: 'https://iptv-searcher.onrender.com/api-docs',
       },
     ],
   },
-  apis: ['./server.js'], // Use inline Swagger comments
+  apis: ['./server.js'],
 };
 
 const swaggerSpec = swaggerJsdoc(swaggerOptions);
 app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
-// Search configuration
+// ===============================
+// Scheduler configuration
+// ===============================
 let scheduler = null;
+let isRunning = false; // prevent overlapping runs
 const AUTO_TERMS = ['iptv', 'm3u', 'bein', 'بث مباشر'];
 
 const runAutoSearch = async () => {
@@ -131,25 +134,37 @@ const runAutoSearch = async () => {
   return { filtered, filename };
 };
 
+// ===============================
+// API Endpoints
+// ===============================
+
 /**
  * @swagger
  * /api/start-scheduler:
  *   post:
  *     summary: Start the automatic IPTV search scheduler
- *     responses:
- *       200:
- *         description: Scheduler started successfully
- *       400:
- *         description: Scheduler is already running
  */
 app.post('/api/start-scheduler', checkSecret, async (req, res) => {
-  if (scheduler) return res.status(400).json({ message: 'Scheduler already running' });
+  if (scheduler) {
+    return res.status(400).json({ message: 'Scheduler already running' });
+  }
 
+  // Run once immediately
   const { filtered, filename } = await runAutoSearch();
 
-  scheduler = setInterval(runAutoSearch, 60000);
-  console.log('✅ Scheduler started');
+  // Then schedule every 60 seconds
+  scheduler = setInterval(async () => {
+    if (isRunning) return; // skip if previous run not finished
+    isRunning = true;
+    try {
+      await runAutoSearch();
+    } catch (err) {
+      console.error("❌ Scheduled run failed:", err.message);
+    }
+    isRunning = false;
+  }, 60000);
 
+  console.log('✅ Scheduler started');
   res.json({
     message: 'Scheduler started',
     results: filtered,
@@ -162,17 +177,15 @@ app.post('/api/start-scheduler', checkSecret, async (req, res) => {
  * /api/stop-scheduler:
  *   post:
  *     summary: Stop the IPTV scheduler
- *     responses:
- *       200:
- *         description: Scheduler stopped successfully
- *       400:
- *         description: Scheduler is not running
  */
 app.post('/api/stop-scheduler', checkSecret, (req, res) => {
-  if (!scheduler) return res.status(400).json({ message: 'Scheduler not running' });
+  if (!scheduler) {
+    return res.status(400).json({ message: 'Scheduler not running' });
+  }
 
   clearInterval(scheduler);
   scheduler = null;
+  isRunning = false; // reset
   console.log('🛑 Scheduler stopped');
   res.json({ message: 'Scheduler stopped' });
 });
@@ -182,11 +195,8 @@ app.post('/api/stop-scheduler', checkSecret, (req, res) => {
  * /api/scheduler-status:
  *   get:
  *     summary: Check if the scheduler is currently running
- *     responses:
- *       200:
- *         description: Scheduler status returned
  */
-app.get('/api/scheduler-status', (req, res) => {
+app.get('/api/scheduler-status', checkSecret, (req, res) => {
   res.json({ running: !!scheduler });
 });
 
@@ -195,13 +205,8 @@ app.get('/api/scheduler-status', (req, res) => {
  * /api/latest-results:
  *   get:
  *     summary: Get the latest saved search results from JSON
- *     responses:
- *       200:
- *         description: JSON results returned
- *       404:
- *         description: No results found
  */
-app.get('/api/latest-results', (req, res) => {
+app.get('/api/latest-results', checkSecret, (req, res) => {
   const files = fs.readdirSync('.')
     .filter(name => name.startsWith('auto_results_') && name.endsWith('.json'))
     .sort()
@@ -216,8 +221,8 @@ app.get('/api/latest-results', (req, res) => {
   res.json(JSON.parse(data));
 });
 
-// === NEW ENDPOINT to serve latest results JSON as a file for download ===
-app.get('/api/download-latest', (req, res) => {
+// === Download latest JSON as file ===
+app.get('/api/download-latest', checkSecret, (req, res) => {
   const files = fs.readdirSync('.')
     .filter(name => name.startsWith('auto_results_') && name.endsWith('.json'))
     .sort()
