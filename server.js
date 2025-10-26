@@ -50,15 +50,23 @@ app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 let scheduler = null;
 let isRunning = false;
 const AUTO_TERMS = [
-  'iptv', 'm3u', 'bein', 'بث مباشر',
+  'iptv',
+  'm3u',
+  'bein',
+  'بث مباشر',
   'world-iptv.club',
   'stbemuiptv.com',
   'iptv2live.com',
   'sultanovic.info',
   'tvappapk.com',
-  'sat-forum.net'
+  'sat-forum.net',
+  'sky',
+  'canal plus',
+  'espn',
+  'dazn'
 ];
 
+ 
 
 // Store all active intervals to clear them properly
 const activeIntervals = new Set();
